@@ -7,75 +7,119 @@ public class EncoderProfile
     public string Extension { get; set; } = ".m4a";
     public string? Codec { get; set; }
     public string? Profile { get; set; }
-    public int[] Bitrates { get; set; } = Array.Empty<int>();
-    public int DefaultBitrate { get; set; }
+    public string Mode { get; set; } = "bitrate"; // "bitrate", "lame_vbr", "vorbis_vbr", "fdk_vbr", "none"
+    public object[] QualityOptions { get; set; } = Array.Empty<object>();
+    public object DefaultQuality { get; set; } = 0;
 
     public static List<EncoderProfile> GetProfiles() => new()
     {
+        // --- ロッシー（VBR / ABR） ---
         new EncoderProfile
         {
-            Name = "AAC-LC (標準高音質)",
+            Name = "MP3 (LAME VBR)",
+            Engine = "ffmpeg",
+            Extension = ".mp3",
+            Codec = "libmp3lame",
+            Mode = "lame_vbr",
+            // V0(最高音質 ~245kbps) 〜 V6(低ビットレート)
+            QualityOptions = new object[] { "V0 (最高品質 ~245k)", "V1 (~225k)", "V2 (標準推奨 ~190k)", "V3 (~175k)", "V4 (~165k)", "V5 (~130k)", "V6 (~115k)" },
+            DefaultQuality = "V2 (標準推奨 ~190k)"
+        },
+        new EncoderProfile
+        {
+            Name = "AAC-LC (libfdk_aac VBR)",
             Engine = "ffmpeg",
             Extension = ".m4a",
             Codec = "libfdk_aac",
             Profile = "aac_low",
-            Bitrates = new[] { 96, 128, 160, 192, 256, 320 },
-            DefaultBitrate = 192
+            Mode = "fdk_vbr",
+            // fdk-aac の -vbr は 1〜5 (5が最高音質 96-128kbps/ch)
+            QualityOptions = new object[] { "VBR Mode 5 (最高品質 ~220-260k)", "VBR Mode 4 (高音質 ~160-190k)", "VBR Mode 3 (標準 ~120-150k)", "VBR Mode 2 (~80-100k)", "VBR Mode 1 (~64k)" },
+            DefaultQuality = "VBR Mode 5 (最高品質 ~220-260k)"
         },
         new EncoderProfile
         {
-            Name = "HE-AAC v1 (中低音質・SBR)",
+            Name = "Ogg Vorbis (VBR)",
+            Engine = "ffmpeg",
+            Extension = ".ogg",
+            Codec = "libvorbis",
+            Mode = "vorbis_vbr",
+            // libvorbis -q:a (0〜10)
+            QualityOptions = new object[] { "q10 (最高品質 ~500k)", "q9 (~320k)", "q8 (~256k)", "q7 (~224k)", "q6 (推奨 ~192k)", "q5 (~160k)", "q4 (~128k)" },
+            DefaultQuality = "q6 (推奨 ~192k)"
+        },
+        new EncoderProfile
+        {
+            Name = "Opus (VBR / ABR)",
+            Engine = "ffmpeg",
+            Extension = ".opus",
+            Codec = "libopus",
+            Mode = "bitrate",
+            QualityOptions = new object[] { 64, 96, 128, 160, 192, 256 },
+            DefaultQuality = 128
+        },
+        new EncoderProfile
+        {
+            Name = "xHE-AAC / USAC (exhale VBR)",
+            Engine = "exhale",
+            Extension = ".m4a",
+            Mode = "bitrate",
+            QualityOptions = new object[] { 24, 32, 40, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 256 },
+            DefaultQuality = 64
+        },
+        new EncoderProfile
+        {
+            Name = "HE-AAC v1 (libfdk_aac ABR)",
             Engine = "ffmpeg",
             Extension = ".m4a",
             Codec = "libfdk_aac",
             Profile = "aac_he",
-            Bitrates = new[] { 48, 64, 80, 96 },
-            DefaultBitrate = 64
+            Mode = "bitrate",
+            QualityOptions = new object[] { 48, 64, 80, 96 },
+            DefaultQuality = 64
         },
         new EncoderProfile
         {
-            Name = "HE-AAC v2 (超低音質・SBR+PS)",
+            Name = "HE-AAC v2 (libfdk_aac ABR)",
             Engine = "ffmpeg",
             Extension = ".m4a",
             Codec = "libfdk_aac",
             Profile = "aac_he_v2",
-            Bitrates = new[] { 24, 32, 40, 48 },
-            DefaultBitrate = 32
+            Mode = "bitrate",
+            QualityOptions = new object[] { 24, 32, 40, 48 },
+            DefaultQuality = 32
+        },
+
+        // --- ロスレス ---
+        new EncoderProfile
+        {
+            Name = "FLAC (可逆圧縮)",
+            Engine = "ffmpeg",
+            Extension = ".flac",
+            Codec = "flac",
+            Mode = "none",
+            QualityOptions = Array.Empty<object>(),
+            DefaultQuality = 0
         },
         new EncoderProfile
         {
-            Name = "xHE-AAC (exhale・最大256k対応)",
-            Engine = "exhale",
+            Name = "ALAC (Apple Lossless / .m4a)",
+            Engine = "ffmpeg",
             Extension = ".m4a",
-            Bitrates = new[] { 24, 32, 40, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 256 },
-            DefaultBitrate = 64
+            Codec = "alac",
+            Mode = "none",
+            QualityOptions = Array.Empty<object>(),
+            DefaultQuality = 0
         },
         new EncoderProfile
         {
-            Name = "MP3 (LAME CBR)",
+            Name = "WavPack (可逆圧縮 / .wv)",
             Engine = "ffmpeg",
-            Extension = ".mp3",
-            Codec = "libmp3lame",
-            Bitrates = new[] { 128, 160, 192, 256, 320 },
-            DefaultBitrate = 192
-        },
-        new EncoderProfile
-        {
-            Name = "Ogg Vorbis",
-            Engine = "ffmpeg",
-            Extension = ".ogg",
-            Codec = "libvorbis",
-            Bitrates = new[] { 96, 128, 160, 192, 256, 320 },
-            DefaultBitrate = 160
-        },
-        new EncoderProfile
-        {
-            Name = "Opus (Ogg)",
-            Engine = "ffmpeg",
-            Extension = ".opus",
-            Codec = "libopus",
-            Bitrates = new[] { 48, 64, 96, 128, 160, 192 },
-            DefaultBitrate = 96
+            Extension = ".wv",
+            Codec = "wavpack",
+            Mode = "none",
+            QualityOptions = Array.Empty<object>(),
+            DefaultQuality = 0
         }
     };
 }

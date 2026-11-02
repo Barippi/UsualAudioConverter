@@ -10,7 +10,7 @@ public static class EncoderService
         string ffmpegPath,
         string exhalePath,
         EncoderProfile profile,
-        int bitrateKbps,
+        object qualityValue,
         IProgress<string> progress,
         CancellationToken ct)
     {
@@ -21,14 +21,69 @@ public static class EncoderService
         {
             if (profile.Engine == "ffmpeg")
             {
-                var args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a {profile.Codec} -b:a {bitrateKbps}k ";
-                if (!string.IsNullOrEmpty(profile.Profile)) args += $"-profile:a {profile.Profile} ";
-                if (profile.Profile is "aac_he" or "aac_he_v2") args += "-ac 2 -ar 44100 ";
+                var args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a {profile.Codec} ";
+
+                // プロファイルごとの品質 / レート指定（VBR / ABR）
+                switch (profile.Mode)
+                {
+                    case "lame_vbr":
+                        // "V2 (標準推奨 ~190k)" -> 2
+                        string qStr = qualityValue.ToString() ?? "V2";
+                        int vbrNum = 2;
+                        if (qStr.StartsWith("V") && char.IsDigit(qStr[1]))
+                            vbrNum = qStr[1] - '0';
+                        args += $"-q:a {vbrNum} ";
+                        break;
+
+                    case "fdk_vbr":
+                        // "VBR Mode 5 (...)" -> 5
+                        string fdkStr = qualityValue.ToString() ?? "5";
+                        int fdkMode = 5;
+                        int idx = fdkStr.IndexOf("Mode ");
+                        if (idx >= 0 && idx + 5 < fdkStr.Length && char.IsDigit(fdkStr[idx + 5]))
+                            fdkMode = fdkStr[idx + 5] - '0';
+                        args += $"-vbr {fdkMode} ";
+                        break;
+
+                    case "vorbis_vbr":
+                        // "q6 (推奨 ~192k)" -> 6
+                        string vorbisStr = qualityValue.ToString() ?? "q6";
+                        int qLevel = 6;
+                        if (vorbisStr.StartsWith("q") && char.IsDigit(vorbisStr[1]))
+                        {
+                            if (vorbisStr.StartsWith("q10")) qLevel = 10;
+                            else qLevel = vorbisStr[1] - '0';
+                        }
+                        args += $"-q:a {qLevel} ";
+                        break;
+
+                    case "bitrate":
+                        int kbps = qualityValue is int k ? k : 128;
+                        args += $"-b:a {kbps}k ";
+                        if (profile.Codec == "libopus")
+                        {
+                            // Opus はデフォルトでVBR、音楽向けモードを明示
+                            args += "-vbr on -application audio ";
+                        }
+                        break;
+
+                    case "none":
+                        // ロスレス形式 (FLAC / ALAC / WavPack)
+                        break;
+                }
+
+                if (!string.IsNullOrEmpty(profile.Profile))
+                    args += $"-profile:a {profile.Profile} ";
+
+                if (profile.Profile is "aac_he" or "aac_he_v2")
+                    args += "-ac 2 -ar 44100 ";
 
                 if (profile.Extension == ".m4a")
                     args += "-map 0:v? -c:v copy -disposition:v:0 attached_pic -map_metadata 0 -movflags +faststart ";
                 else if (profile.Extension == ".mp3")
                     args += "-map 0:v? -c:v copy -id3v2_version 3 -map_metadata 0 ";
+                else if (profile.Extension is ".flac" or ".wv")
+                    args += "-map 0:v? -c:v copy -map_metadata 0 ";
                 else
                     args += "-vn -map_metadata 0 ";
 
@@ -38,15 +93,17 @@ public static class EncoderService
             }
             else if (profile.Engine == "exhale")
             {
-                // exhale はパイプ入力不可・事前出力ファイル存在不可のため、中間WAVを実体出力して渡す
                 string tempWav = Path.Combine(tempDir, $"{Guid.NewGuid()}.wav");
+                string exhaleRawOut = Path.Combine(tempDir, $"{Guid.NewGuid()}_raw.m4a");
+
                 try
                 {
                     progress.Report("WAV展開中");
                     string wavArgs = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -c:a pcm_s16le \"{tempWav}\"";
                     await RunProcessAsync(ffmpegPath, wavArgs, ct, null);
 
-                    string preset = bitrateKbps switch
+                    int kbps = qualityValue is int k ? k : 64;
+                    string preset = kbps switch
                     {
                         <= 24 => "a",
                         <= 36 => "b",
@@ -63,27 +120,35 @@ public static class EncoderService
                     };
 
                     progress.Report($"xHE変換中({preset})");
-                    // exhale は既存ファイルが存在するとエラー終了するため、事前に削除
+                    if (File.Exists(exhaleRawOut)) File.Delete(exhaleRawOut);
+
+                    string exArgs = $"{preset} \"{tempWav}\" \"{exhaleRawOut}\"";
+                    await RunProcessAsync(exhalePath, exArgs, ct, null);
+
+                    progress.Report("メタデータ転送中");
                     if (File.Exists(tempOut)) File.Delete(tempOut);
 
-                    string exArgs = $"{preset} \"{tempWav}\" \"{tempOut}\"";
-                    await RunProcessAsync(exhalePath, exArgs, ct, null);
+                    string tagArgs = $"-y -nostdin -i \"{exhaleRawOut}\" -i \"{item.SourcePath}\" " +
+                                     $"-map 0:a -map 1:v? -c copy -disposition:v:0 attached_pic " +
+                                     $"-map_metadata 1 -movflags +faststart \"{tempOut}\"";
+                    await RunProcessAsync(ffmpegPath, tagArgs, ct, null);
                 }
                 finally
                 {
-                    if (File.Exists(tempWav))
-                    {
-                        try { File.Delete(tempWav); } catch { }
-                    }
+                    if (File.Exists(tempWav)) { try { File.Delete(tempWav); } catch { } }
+                    if (File.Exists(exhaleRawOut)) { try { File.Delete(exhaleRawOut); } catch { } }
                 }
             }
 
-            // 最終保存先へ安全移動
             string? destDir = Path.GetDirectoryName(item.DestinationPath);
-            if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir);
-            if (File.Exists(item.DestinationPath)) File.Delete(item.DestinationPath);
+            if (!string.IsNullOrEmpty(destDir))
+                Directory.CreateDirectory(destDir);
+
+            if (File.Exists(item.DestinationPath))
+                File.Delete(item.DestinationPath);
 
             File.Move(tempOut, item.DestinationPath);
+
             item.Status = "完了";
             progress.Report("完了");
         }
@@ -126,6 +191,7 @@ public static class EncoderService
         await proc.WaitForExitAsync(ct);
 
         string err = await readErrTask;
+
         if (proc.ExitCode != 0)
         {
             throw new InvalidOperationException($"プロセス異常終了 (ExitCode: {proc.ExitCode}):\n{err}");

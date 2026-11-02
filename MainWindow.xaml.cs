@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 
 namespace UsualAudioConverter;
@@ -10,7 +12,7 @@ public partial class MainWindow : Window
 {
     private static readonly HashSet<string> ValidExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff"
+        ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".wv"
     };
 
     public ObservableCollection<AudioItem> Items { get; } = new();
@@ -23,22 +25,34 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        GridItems.ItemsSource = Items;
 
+        try
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            using var stream = asm.GetManifestResourceStream("UsualAudioConverter.app.ico");
+            if (stream != null)
+            {
+                Icon = BitmapFrame.Create(stream);
+            }
+        }
+        catch
+        {
+        }
+
+        GridItems.ItemsSource = Items;
         InitializeControls();
     }
 
     private void InitializeControls()
     {
-        // プロファイル設定
         var profiles = EncoderProfile.GetProfiles();
         ComboProfiles.ItemsSource = profiles;
         ComboProfiles.DisplayMemberPath = "Name";
         ComboProfiles.SelectedIndex = 0;
 
-        // 論理コア数に応じた並列度
         int cores = Environment.ProcessorCount;
         int defaultThreads = cores <= 2 ? 1 : (cores <= 4 ? 2 : Math.Min(8, cores - 2));
+
         var threadOptions = new HashSet<int> { 1, 2, 4, 6, 8, cores, defaultThreads };
         ComboThreads.ItemsSource = threadOptions.Where(t => t <= cores).OrderBy(t => t).ToList();
         ComboThreads.SelectedItem = defaultThreads;
@@ -47,8 +61,19 @@ public partial class MainWindow : Window
     private void ComboProfiles_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (ComboProfiles.SelectedItem is not EncoderProfile selected) return;
-        ComboBitrate.ItemsSource = selected.Bitrates;
-        ComboBitrate.SelectedItem = selected.DefaultBitrate;
+
+        if (selected.QualityOptions != null && selected.QualityOptions.Length > 0)
+        {
+            ComboBitrate.IsEnabled = true;
+            ComboBitrate.ItemsSource = selected.QualityOptions;
+            ComboBitrate.SelectedItem = selected.DefaultQuality;
+        }
+        else
+        {
+            ComboBitrate.ItemsSource = new[] { "N/A (ロスレス)" };
+            ComboBitrate.SelectedIndex = 0;
+            ComboBitrate.IsEnabled = false;
+        }
     }
 
     private void GridItems_DragOver(object sender, DragEventArgs e)
@@ -65,7 +90,6 @@ public partial class MainWindow : Window
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
         var files = (string[])e.Data.GetData(DataFormats.FileDrop);
         if (files == null || files.Length == 0) return;
-
         AddPaths(files);
     }
 
@@ -74,7 +98,7 @@ public partial class MainWindow : Window
         var ofd = new OpenFileDialog
         {
             Multiselect = true,
-            Filter = "Audio Files|*.wav;*.flac;*.mp3;*.m4a;*.aac;*.ogg;*.opus;*.wma;*.aiff|All Files|*.*"
+            Filter = "Audio Files|*.wav;*.flac;*.mp3;*.m4a;*.aac;*.ogg;*.opus;*.wma;*.aiff;*.wv|All Files|*.*"
         };
         if (ofd.ShowDialog() == true)
         {
@@ -110,7 +134,6 @@ public partial class MainWindow : Window
                 });
             }
         }
-
         TxtStatus.Text = $"{Items.Count} 件のファイルが登録されています";
     }
 
@@ -129,7 +152,10 @@ public partial class MainWindow : Window
 
     private void BtnBrowseDir_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog { Title = "保存先フォルダを選択" };
+        var dialog = new OpenFolderDialog
+        {
+            Title = "保存先フォルダを選択"
+        };
         if (dialog.ShowDialog() == true)
         {
             TxtCustomDir.Text = dialog.FolderName;
@@ -138,14 +164,23 @@ public partial class MainWindow : Window
 
     private void BtnSettings_Click(object sender, RoutedEventArgs e)
     {
-        var ofdFf = new OpenFileDialog { Title = "ffmpeg.exe を指定", Filter = "ffmpeg.exe|ffmpeg.exe|All Files|*.*" };
-        if (ofdFf.ShowDialog() == true) _ffmpegPath = ofdFf.FileName;
+        var ofdFf = new OpenFileDialog
+        {
+            Title = "ffmpeg.exe を指定",
+            Filter = "ffmpeg.exe|ffmpeg.exe|All Files|*.*"
+        };
+        if (ofdFf.ShowDialog() == true)
+            _ffmpegPath = ofdFf.FileName;
 
-        var ofdEx = new OpenFileDialog { Title = "exhale.exe を指定", Filter = "exhale.exe|exhale.exe|All Files|*.*" };
-        if (ofdEx.ShowDialog() == true) _exhalePath = ofdEx.FileName;
+        var ofdEx = new OpenFileDialog
+        {
+            Title = "exhale.exe を指定",
+            Filter = "exhale.exe|exhale.exe|All Files|*.*"
+        };
+        if (ofdEx.ShowDialog() == true)
+            _exhalePath = ofdEx.FileName;
     }
 
-    // 先頭と末尾のサンプルから O(1) で共通ルートを算出する高速ロジック
     private static string? CalculateCommonRootFast(IList<AudioItem> items)
     {
         if (items.Count == 0) return null;
@@ -173,13 +208,14 @@ public partial class MainWindow : Window
     {
         if (Items.Count == 0) return;
         if (ComboProfiles.SelectedItem is not EncoderProfile profile) return;
-        int bitrate = (int)ComboBitrate.SelectedItem;
+
+        object quality = ComboBitrate.SelectedItem ?? profile.DefaultQuality;
         int maxThreads = (int)ComboThreads.SelectedItem;
 
-        // 出力先パスの事前解決
         bool isCustom = RadioCustomDir.IsChecked == true;
         bool keepStructure = ChkKeepStructure.IsChecked == true;
         string customBase = TxtCustomDir.Text.Trim();
+
         string? commonRoot = (isCustom && keepStructure) ? CalculateCommonRootFast(Items) : null;
 
         foreach (var item in Items)
@@ -191,7 +227,8 @@ public partial class MainWindow : Window
                     ? (Path.GetDirectoryName(item.SourcePath) ?? string.Empty)
                     : customBase;
 
-                if (keepStructure && !string.IsNullOrEmpty(commonRoot) && item.SourcePath.StartsWith(commonRoot, StringComparison.OrdinalIgnoreCase))
+                if (keepStructure && !string.IsNullOrEmpty(commonRoot) &&
+                    item.SourcePath.StartsWith(commonRoot, StringComparison.OrdinalIgnoreCase))
                 {
                     string rel = Path.GetRelativePath(commonRoot, Path.GetDirectoryName(item.SourcePath) ?? string.Empty);
                     outDir = Path.Combine(baseDir, rel);
@@ -208,16 +245,19 @@ public partial class MainWindow : Window
 
             string baseName = Path.GetFileNameWithoutExtension(item.SourcePath);
             string targetPath = Path.Combine(outDir, $"{baseName}{profile.Extension}");
+
             if (string.Equals(item.SourcePath, targetPath, StringComparison.OrdinalIgnoreCase))
             {
                 targetPath = Path.Combine(outDir, $"{baseName}_converted{profile.Extension}");
             }
+
             item.DestinationPath = targetPath;
         }
 
         SetUiEncodingState(true);
         _cts = new CancellationTokenSource();
         int completed = 0;
+
         ProgressTotal.Maximum = Items.Count;
         ProgressTotal.Value = 0;
 
@@ -237,12 +277,17 @@ public partial class MainWindow : Window
                 try
                 {
                     await EncoderService.EncodeAsync(
-                        item, _ffmpegPath, _exhalePath, profile, bitrate, progress, ct
+                        item,
+                        _ffmpegPath,
+                        _exhalePath,
+                        profile,
+                        quality,
+                        progress,
+                        ct
                     );
                 }
                 catch
                 {
-                    // エラーは item 内に保存
                 }
                 finally
                 {
