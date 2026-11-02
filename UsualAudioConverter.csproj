@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>UsualAudioConverter</RootNamespace>
+    <AssemblyName>UsualAudioConverter</AssemblyName>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    
+    <!-- 単一exe発行設定 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="app.ico" />
+    <Resource Include="app.png" />
+  </ItemGroup>
+
+</Project>
