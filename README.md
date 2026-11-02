@@ -45,6 +45,13 @@ A high-performance Windows batch audio converter optimized for massive music lib
 > ⚠️ **FFmpegに関する重要なお知らせ:**  
 > 本ツールは `libfdk_aac` を使用したAACエンコードに対応しているため、`--enable-nonfree`（および `--enable-gpl`）を有効にしてビルドされたFFmpegバイナリが必要です。一般的なLGPL版のFFmpegバイナリには、ライセンスの制約上 `libfdk_aac` が含まれていませんのでご注意ください。
 
+### FFmpeg with `libfdk_aac` Requirement
+AAC-LC and HE-AAC profiles require an FFmpeg binary compiled with `--enable-libfdk-aac` (non-free). 
+
+Due to licensing restrictions, pre-built binaries containing `libfdk_aac` cannot be distributed publicly. If you need to build your own custom FFmpeg binary on Windows, we recommend using:
+- **[media-autobuild_suite](https://github.com/m-ab-s/media-autobuild_suite)** (An automated Windows compiler environment for FFmpeg)
+
+*Note: For formats like xHE-AAC (`exhale.exe`), MP3, Opus, or Ogg Vorbis, standard public FFmpeg builds work out of the box without special flags.*
 ---
 
 ## Build Instructions / ビルド手順
