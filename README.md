@@ -36,11 +36,12 @@ A high-performance Windows batch audio converter optimized for massive music lib
 | **Opus** | `ffmpeg.exe` (`libopus`) | FFmpeg | 48 kbps - 192 kbps |
 
 *Note: Binaries (`ffmpeg.exe` and `exhale.exe`) are not bundled. Please specify their paths in the settings dialog.*
+
 > ⚠️ **Important FFmpeg Requirement:**  
 > Since this tool supports AAC encoding via `libfdk_aac`, you must use an FFmpeg binary compiled with `--enable-nonfree` (and `--enable-gpl`). Standard LGPL builds of FFmpeg do not include `libfdk_aac` due to licensing restrictions.
 
+*注意: `ffmpeg.exe` および `exhale.exe` は同梱されていません。設定画面からそれぞれのパスを指定してください。*
 
->*注意: `ffmpeg.exe` および `exhale.exe` は同梱されていません。設定画面からそれぞれのパスを指定してください。*
 > ⚠️ **FFmpegに関する重要なお知らせ:**  
 > 本ツールは `libfdk_aac` を使用したAACエンコードに対応しているため、`--enable-nonfree`（および `--enable-gpl`）を有効にしてビルドされたFFmpegバイナリが必要です。一般的なLGPL版のFFmpegバイナリには、ライセンスの制約上 `libfdk_aac` が含まれていませんのでご注意ください。
 
