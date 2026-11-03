@@ -15,6 +15,12 @@ public partial class MainWindow : Window
         ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".wv"
     };
 
+    // アルバム付随ファイルとして自動コピー対象とする拡張子
+    private static readonly HashSet<string> CompanionExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".webp", ".cue", ".log"
+    };
+
     public ObservableCollection<AudioItem> Items { get; } = new();
     private readonly HashSet<string> _queuedPaths = new(StringComparer.OrdinalIgnoreCase);
 
@@ -204,6 +210,58 @@ public partial class MainWindow : Window
         return lastSlash > 0 ? common[..lastSlash] : common;
     }
 
+    /// <summary>
+    /// 各アルバムフォルダ内の cover.jpg / folder.jpg などの付随ファイルを出力先へ自動コピー
+    /// </summary>
+    private static void CopyAlbumCompanionFiles(IEnumerable<AudioItem> items)
+    {
+        var folderPairs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in items)
+        {
+            string srcDir = Path.GetDirectoryName(item.SourcePath) ?? string.Empty;
+            string destDir = Path.GetDirectoryName(item.DestinationPath) ?? string.Empty;
+
+            if (!string.IsNullOrEmpty(srcDir) && !string.IsNullOrEmpty(destDir))
+            {
+                if (!folderPairs.ContainsKey(srcDir))
+                {
+                    folderPairs[srcDir] = destDir;
+                }
+            }
+        }
+
+        foreach (var (srcDir, destDir) in folderPairs)
+        {
+            if (string.Equals(srcDir, destDir, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!Directory.Exists(srcDir)) continue;
+
+            try
+            {
+                Directory.CreateDirectory(destDir);
+
+                foreach (var file in Directory.EnumerateFiles(srcDir))
+                {
+                    string ext = Path.GetExtension(file);
+                    if (CompanionExtensions.Contains(ext))
+                    {
+                        string targetFile = Path.Combine(destDir, Path.GetFileName(file));
+                        if (!File.Exists(targetFile))
+                        {
+                            File.Copy(file, targetFile, overwrite: false);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // コピー失敗時もエンコード処理は継続
+            }
+        }
+    }
+
     private async void BtnStart_Click(object sender, RoutedEventArgs e)
     {
         if (Items.Count == 0) return;
@@ -253,6 +311,9 @@ public partial class MainWindow : Window
 
             item.DestinationPath = targetPath;
         }
+
+        // エンコード開始前にアルバム付随ファイル (cover.jpg, folder.jpg 等) を出力先へコピー
+        CopyAlbumCompanionFiles(Items);
 
         SetUiEncodingState(true);
         _cts = new CancellationTokenSource();
