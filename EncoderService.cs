@@ -27,7 +27,6 @@ public static class EncoderService
                 switch (profile.Mode)
                 {
                     case "lame_vbr":
-                        // "V2 (標準推奨 ~190k)" -> 2
                         string qStr = qualityValue.ToString() ?? "V2";
                         int vbrNum = 2;
                         if (qStr.StartsWith("V") && char.IsDigit(qStr[1]))
@@ -36,7 +35,6 @@ public static class EncoderService
                         break;
 
                     case "fdk_vbr":
-                        // "VBR Mode 5 (...)" -> 5
                         string fdkStr = qualityValue.ToString() ?? "5";
                         int fdkMode = 5;
                         int idx = fdkStr.IndexOf("Mode ");
@@ -46,7 +44,6 @@ public static class EncoderService
                         break;
 
                     case "vorbis_vbr":
-                        // "q6 (推奨 ~192k)" -> 6
                         string vorbisStr = qualityValue.ToString() ?? "q6";
                         int qLevel = 6;
                         if (vorbisStr.StartsWith("q") && char.IsDigit(vorbisStr[1]))
@@ -93,15 +90,10 @@ public static class EncoderService
             }
             else if (profile.Engine == "exhale")
             {
-                string tempWav = Path.Combine(tempDir, $"{Guid.NewGuid()}.wav");
                 string exhaleRawOut = Path.Combine(tempDir, $"{Guid.NewGuid()}_raw.m4a");
 
                 try
                 {
-                    progress.Report("WAV展開中");
-                    string wavArgs = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -c:a pcm_s16le \"{tempWav}\"";
-                    await RunProcessAsync(ffmpegPath, wavArgs, ct, null);
-
                     int kbps = qualityValue is int k ? k : 64;
                     string preset = kbps switch
                     {
@@ -119,11 +111,13 @@ public static class EncoderService
                         _ => "9"
                     };
 
-                    progress.Report($"xHE変換中({preset})");
+                    progress.Report($"xHEパイプ変換中({preset})");
                     if (File.Exists(exhaleRawOut)) File.Delete(exhaleRawOut);
 
-                    string exArgs = $"{preset} \"{tempWav}\" \"{exhaleRawOut}\"";
-                    await RunProcessAsync(exhalePath, exArgs, ct, null);
+                    // cmd /c 経由で ffmpeg の stdout (WAV) を exhale の stdin へ直接流し込む
+                    // 中間 WAV ファイルのディスク書き込みを完全スキップ
+                    string pipeArgs = $"/c \"\"{ffmpegPath}\" -y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav - | \"{exhalePath}\" {preset} \"{exhaleRawOut}\"\"";
+                    await RunProcessAsync("cmd.exe", pipeArgs, ct, null);
 
                     progress.Report("メタデータ転送中");
                     if (File.Exists(tempOut)) File.Delete(tempOut);
@@ -135,7 +129,6 @@ public static class EncoderService
                 }
                 finally
                 {
-                    if (File.Exists(tempWav)) { try { File.Delete(tempWav); } catch { } }
                     if (File.Exists(exhaleRawOut)) { try { File.Delete(exhaleRawOut); } catch { } }
                 }
             }
