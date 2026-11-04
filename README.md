@@ -8,33 +8,36 @@
 
 Usual Audio Converter は、**FFmpeg** と **exhale** をバックエンドに採用した、Windows 向けの軽量かつ高速なバッチ音声変換デスクトップアプリケーション（WPF / C# / .NET 8）です。
 
-日常的な音楽ライブラリの省容量化・高品質化からアーカイブ向けのロスレス変換まで、主要なオーディオコーデックを網羅し、直感的な操作で一括変換できます。
+日常的な音楽ライブラリの省容量化・高品質化から、アーカイブ向けのロスレス変換まで、主要なオーディオコーデックを網羅し、直感的な操作で一括変換できます。
 
 ### 主な特徴
 
-* **多彩なコーデック対応**
-  * **ロッシー（音質優先の VBR / ABR）**: xHE-AAC (USAC), AAC-LC, HE-AAC v1, HE-AAC v2, MP3 (LAME), Ogg Vorbis, Opus
-  * **ロスレス（可逆圧縮）**: FLAC, ALAC (Apple Lossless), WavPack (.wv)
-* **VBR / ABR 最適化**
-  * MP3 の LAME VBR（V0〜V6）、libfdk_aac の VBR（Mode 1〜5）、Vorbis のネイティブ VBR（q4〜q10）、Opus の動的 VBR など、コーデック本来の音響心理モデルを最大限に活かす可変レート設計を採用。
-* **ディスクレスな xHE-AAC (exhale) パイプライン連携**
-  * FFmpeg のデコードストリーム（`-f wav -`）から `exhale` の標準入力へメモリ上でダイレクトにパイプ連携。中間 WAV ファイルのディスク書き込み・削除を完全排除し、SSD への I/O 負荷低減と高速化を実現。
-* **メタデータ＆アルバムアートの完全保持**
-  * MP3 や AAC-LC はもちろん、xHE-AAC (exhale) においても変換後に FFmpeg のストリームコピー（`-c copy`）を用いて元ファイルの曲情報・ジャケット画像を無劣化で自動統合・転送。
-* **アルバム付随ファイルの自動コピー**
-  * エンコード実行時、元フォルダに存在するジャケット画像（`cover.jpg`, `folder.jpg`, `.png`, `.webp`）やシート情報（`.cue`, `.log`）を出力先フォルダへ自動的に複製。
-* **マルチスレッド並列処理**
-  * `Parallel.ForEachAsync` によるマルチコア CPU をフル活用した高速バッチエンコード。CPU コア数に応じたスレッド数調整が可能。
-* **大容量ライブラリに耐える UI 設計**
-  * WPF の UI 仮想化（`VirtualizingStackPanel`）により、数万曲規模のキュー投入でも軽快に動作。元フォルダの階層構造を維持した出力にも対応。
-* **ポータブル＆スタンドアロン実行**
-  * 単一ファイル（SingleFile）発行に対応。インストーラー不要で解凍後すぐに利用可能。
+- **多彩なコーデック対応**
+  - **ロッシー（音質優先の VBR / ABR）**: xHE-AAC (USAC), AAC-LC, HE-AAC v1, HE-AAC v2, MP3 (LAME), Ogg Vorbis, Opus
+  - **ロスレス（可逆圧縮）**: FLAC, ALAC (Apple Lossless), WavPack (.wv)
+- **VBR / ABR 最適化**
+  - MP3 の LAME VBR（V0〜V6）、libfdk_aac の VBR（Mode 1〜5）、Vorbis のネイティブ VBR（q4〜q10）、Opus の動的 VBR など、コーデック本来の音響心理モデルを最大限に活かす可変レート設計を採用。
+- **ディスクレス＆高速ストリーミング（exhale ネイティブパイプ連携）**
+  - xHE-AAC (exhale) 変換時、中間 WAV ファイルをディスクに書き出すことなく、C# ネイティブの非同期ストリームパイプで FFmpeg と exhale をメモリ直結。
+  - NVMe / SSD の寿命消費や一時容量圧迫を排除し、ネットワークドライブ（NAS / UNC パス `\\server\share` や割り当てドライブ）上の音源も高速かつ安定して直接変換可能。
+- **メタデータ＆アルバムアートの完全保持**
+  - MP3 や AAC-LC はもちろん、ストリーミング変換を行う **xHE-AAC (exhale)** においても、変換後に FFmpeg のストリームコピー（`-c copy`）を用いて元ファイルの曲情報・ジャケット画像を無劣化で自動統合・転送。
+- **アルバム付随ファイル（カバー画像・CUEシート等）の自動コピー**
+  - 音源ファイル内に画像が埋め込まれていない環境でも、同フォルダ内に存在する `cover.jpg`, `folder.jpg`, `.cue`, `.log` などの関連ファイルを出力先フォルダへ自動的に複製・追従配置。
+- **マルチスレッド並列処理**
+  - `Parallel.ForEachAsync` によるマルチコア CPU をフル活用した高速バッチエンコード。
+  - CPU の論理コア数に応じた並列度（スレッド数）の自由な切り替え。
+- **大容量ライブラリに耐える UI 設計**
+  - WPF の UI 仮想化（`VirtualizingStackPanel`）により、数万曲規模のキュー投入でも軽快に動作。
+  - 元フォルダの階層構造を維持したまま出力先に展開可能。
+- **ポータブル＆スタンドアロン実行**
+  - 単一ファイル（SingleFile）発行に対応。インストーラー不要で解凍後すぐに利用可能。
 
 ### 対応コーデック一覧
 
 | 形式 / コーデック | エンジン | 出力拡張子 | レート / 品質指定 | 備考 |
 | :--- | :--- | :--- | :--- | :--- |
-| **xHE-AAC / USAC** | exhale | `.m4a` | プリセット a〜c, 1〜9 | メモリ上パイプライン処理。タグ・画像自動統合 |
+| **xHE-AAC / USAC** | exhale | `.m4a` | プリセット a〜c, 1〜9 | ネイティブパイプ接続。メタデータ・画像自動保持 |
 | **AAC-LC** | FFmpeg | `.m4a` | VBR Mode 1〜5 (fdk) | 最高音質 Mode 5 (~220-260k) 推奨 |
 | **HE-AAC v1** | FFmpeg | `.m4a` | ABR 48k〜96k | 中低ビットレート向け（SBR） |
 | **HE-AAC v2** | FFmpeg | `.m4a` | ABR 24k〜48k | 超低ビットレート向け（SBR + PS） |
@@ -47,12 +50,13 @@ Usual Audio Converter は、**FFmpeg** と **exhale** をバックエンドに�
 
 ### 必要な外部バイナリ
 
-本アプリケーションの実行には、以下のバイナリが必要です。アプリケーションと同じディレクトリ、またはシステム環境変数 `PATH` の通った場所に配置するか、アプリ内の「設定」ボタンから各バイナリのパスを指定してください。
+本アプリケーションの実行には、以下のバイナリが必要です。  
+アプリケーションと同じディレクトリ、またはシステム環境変数 `PATH` の通った場所に配置するか、アプリ内の「設定」ボタンから各バイナリのパスを指定してください。
 
 1. **`ffmpeg.exe`**
-   * ※ AAC-LC / HE-AAC の高品質エンコードには、`libfdk_aac` が有効化されたビルドを推奨します。[media-autobuild_suite](https://github.com/m-ab-s/media-autobuild_suite) 等でセルフビルドするか、互換ビルドをご用意ください。
+   - ※ AAC-LC / HE-AAC の高品質エンコードには、`libfdk_aac` が有効化されたビルドを推奨します。[media-autobuild_suite](https://github.com/m-ab-s/media-autobuild_suite) 等でセルフビルドするか、互換ビルドをご用意ください。
 2. **`exhale.exe`**
-   * xHE-AAC (Extended HE-AAC / USAC) エンコード用バイナリ（v1.2.2 以降）。
+   - xHE-AAC (Extended HE-AAC / USAC) エンコード用バイナリ（v1.2.2 以降）。
 
 ### 使い方
 
@@ -67,33 +71,35 @@ Usual Audio Converter は、**FFmpeg** と **exhale** をバックエンドに�
 
 **Usual Audio Converter** is a lightweight, high-performance batch audio converter for Windows built with WPF, C#, and .NET 8, powered by **FFmpeg** and **exhale**.
 
-It covers a comprehensive lineup of modern lossy and lossless audio codecs, offering an intuitive GUI for converting music libraries with optimized VBR settings, zero-disk-overhead streaming, and preserved metadata.
+It covers a comprehensive lineup of modern lossy and lossless audio codecs, offering an intuitive GUI for converting music libraries with optimized VBR settings, zero disk-footprint pipe streaming, and preserved metadata.
 
 ### Key Features
 
-* **Wide Codec Support**
-  * **Lossy (Quality-Focused VBR/ABR)**: xHE-AAC (USAC), AAC-LC, HE-AAC v1, HE-AAC v2, MP3 (LAME), Ogg Vorbis, Opus
-  * **Lossless (Bit-perfect)**: FLAC, ALAC (Apple Lossless), WavPack (.wv)
-* **Optimized VBR / ABR Profiles**
-  * Tuned for psychoacoustic efficiency: LAME MP3 VBR (V0–V6), libfdk_aac VBR (Mode 1–5), Vorbis native VBR (q4–q10), and Opus dynamic VBR.
-* **Diskless xHE-AAC (exhale) Piped Streaming**
-  * Directly pipes the FFmpeg decoded stream (`-f wav -`) into `exhale`'s standard input in memory. Completely eliminates intermediate WAV disk I/O, reducing SSD wear and maximizing throughput.
-* **Full Metadata & Cover Art Preservation**
-  * Preserves ID3/M4A tags and embedded artwork. For **xHE-AAC (exhale)**, a 2-step pipeline uses FFmpeg stream copy (`-c copy`) to merge the original metadata and album art without lossy re-encoding.
-* **Companion Files Auto-Copy**
-  * Automatically replicates album art (`cover.jpg`, `folder.jpg`, `.png`, `.webp`) and metadata companion files (`.cue`, `.log`) from source directories into target folders.
-* **Multi-Threaded Batch Encoding**
-  * Fully asynchronous execution via `Parallel.ForEachAsync` with customizable thread limits.
-* **Engineered for Massive Libraries**
-  * Virtualized list view (`VirtualizingStackPanel`) ensures smooth scrolling even with tens of thousands of queued tracks. Maintains directory structures upon export.
-* **Portable & Standalone**
-  * Single-file executable deployment (`PublishSingleFile`). No installer required.
+- **Wide Codec Support**
+  - **Lossy (Quality-Focused VBR/ABR)**: xHE-AAC (USAC), AAC-LC, HE-AAC v1, HE-AAC v2, MP3 (LAME), Ogg Vorbis, Opus
+  - **Lossless (Bit-perfect)**: FLAC, ALAC (Apple Lossless), WavPack (.wv)
+- **Optimized VBR / ABR Profiles**
+  - Tuned for psychoacoustic efficiency: LAME MP3 VBR (V0–V6), libfdk_aac VBR (Mode 1–5), Vorbis native VBR (q4–q10), and Opus dynamic VBR.
+- **Diskless Native Pipe Streaming (exhale)**
+  - Streams decoded audio directly from FFmpeg to exhale's standard input in memory using asynchronous C# stream piping without writing intermediate WAV files to disk.
+  - Eliminates unnecessary SSD write endurance wear and temp storage consumption, while providing robust support for remote sources on network drives / UNC paths (`\\server\share`).
+- **Full Metadata & Cover Art Preservation**
+  - Preserves ID3/M4A tags and embedded artwork. For **xHE-AAC (exhale)**, a subsequent stage uses FFmpeg stream copy (`-c copy`) to merge the original metadata and album art without lossy re-encoding.
+- **Automatic Album Companion Files Copying**
+  - Automatically copies external cover art (`cover.jpg`, `folder.jpg`, etc.) and auxiliary files (`.cue`, `.log`) to the output directories, maintaining full album organization.
+- **Multi-Threaded Batch Encoding**
+  - Fully asynchronous batch processing via `Parallel.ForEachAsync` with customizable thread limits.
+- **Engineered for Massive Libraries**
+  - Virtualized list view (`VirtualizingStackPanel`) ensures smooth scrolling even with tens of thousands of queued tracks.
+  - Preserves original directory structures upon export.
+- **Portable & Standalone**
+  - Single-file executable deployment (`PublishSingleFile`). No installer required.
 
 ### Supported Codecs
 
 | Format / Codec | Engine | Container | Quality / Rate Mode | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **xHE-AAC / USAC** | exhale | `.m4a` | Presets a–c, 1–9 | In-memory pipe stream. Auto-merges tags & artwork |
+| **xHE-AAC / USAC** | exhale | `.m4a` | Presets a–c, 1–9 | Native pipe stream. Auto-merges tags & artwork |
 | **AAC-LC** | FFmpeg | `.m4a` | VBR Mode 1–5 (fdk) | High quality Mode 5 (~220–260k) recommended |
 | **HE-AAC v1** | FFmpeg | `.m4a` | ABR 48k–96k | Optimized for low-to-mid bitrates (SBR) |
 | **HE-AAC v2** | FFmpeg | `.m4a` | ABR 24k–48k | Parametric Stereo for ultra-low bitrates |
@@ -109,9 +115,9 @@ It covers a comprehensive lineup of modern lossy and lossless audio codecs, offe
 The following binaries are required to run the converter. Place them in the application folder, include them in your system `PATH`, or configure their paths via the in-app "Settings" button.
 
 1. **`ffmpeg.exe`**
-   * *Note*: For AAC-LC and HE-AAC, a build with `libfdk_aac` enabled is recommended (e.g., self-built using [media-autobuild_suite](https://github.com/m-ab-s/media-autobuild_suite)).
+   - *Note*: For AAC-LC and HE-AAC, a build with `libfdk_aac` enabled is recommended (e.g., self-built using [media-autobuild_suite](https://github.com/m-ab-s/media-autobuild_suite)).
 2. **`exhale.exe`**
-   * Required for xHE-AAC (USAC) encoding (v1.2.2 or later).
+   - Required for xHE-AAC (USAC) encoding (v1.2.2 or later).
 
 ### Build Instructions
 
@@ -126,10 +132,8 @@ cd UsualAudioConverter
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
 ```
 
-The output binary will be located at:  
+The output binary will be located at:
 `bin\Release\net8.0-windows\win-x64\publish\UsualAudioConverter.exe`
-
----
 
 ## License
 

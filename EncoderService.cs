@@ -59,7 +59,6 @@ public static class EncoderService
                         args += $"-b:a {kbps}k ";
                         if (profile.Codec == "libopus")
                         {
-                            // Opus はデフォルトでVBR、音楽向けモードを明示
                             args += "-vbr on -application audio ";
                         }
                         break;
@@ -114,11 +113,65 @@ public static class EncoderService
                     progress.Report($"xHEパイプ変換中({preset})");
                     if (File.Exists(exhaleRawOut)) File.Delete(exhaleRawOut);
 
-                    // cmd /c 経由で ffmpeg の stdout (WAV) を exhale の stdin へ直接流し込む
-                    // 中間 WAV ファイルのディスク書き込みを完全スキップ
-                    string pipeArgs = $"/c \"\"{ffmpegPath}\" -y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav - | \"{exhalePath}\" {preset} \"{exhaleRawOut}\"\"";
-                    await RunProcessAsync("cmd.exe", pipeArgs, ct, null);
+                    // cmd.exe を一切介さず、C# の Stream で直接パイプラインを中継
+                    // ネットワーク共有（UNCパス \server\share や Z:\）でもシェル制約・クォート崩れを受けない
+                    var ffPsi = new ProcessStartInfo
+                    {
+                        FileName = ffmpegPath,
+                        Arguments = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav -",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
 
+                    var exPsi = new ProcessStartInfo
+                    {
+                        FileName = exhalePath,
+                        Arguments = $"{preset} \"{exhaleRawOut}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardInput = true,
+                        RedirectStandardError = true
+                    };
+
+                    using (var procFf = new Process { StartInfo = ffPsi })
+                    using (var procEx = new Process { StartInfo = exPsi })
+                    {
+                        procFf.Start();
+                        procEx.Start();
+
+                        // FFmpegの標準出力をexhaleの標準入力へ非同期ストリームコピー
+                        var pipeTask = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await procFf.StandardOutput.BaseStream.CopyToAsync(procEx.StandardInput.BaseStream, ct);
+                            }
+                            finally
+                            {
+                                procEx.StandardInput.Close(); // 入力終了を通知
+                            }
+                        }, ct);
+
+                        var ffErrTask = procFf.StandardError.ReadToEndAsync(ct);
+                        var exErrTask = procEx.StandardError.ReadToEndAsync(ct);
+
+                        await Task.WhenAll(procFf.WaitForExitAsync(ct), procEx.WaitForExitAsync(ct), pipeTask);
+
+                        if (procFf.ExitCode != 0)
+                        {
+                            string ffErr = await ffErrTask;
+                            throw new InvalidOperationException($"FFmpeg異常終了 (ExitCode: {procFf.ExitCode}):\n{ffErr}");
+                        }
+                        if (procEx.ExitCode != 0)
+                        {
+                            string exErr = await exErrTask;
+                            throw new InvalidOperationException($"exhale異常終了 (ExitCode: {procEx.ExitCode}):\n{exErr}");
+                        }
+                    }
+
+                    // メタデータ転送
                     progress.Report("メタデータ転送中");
                     if (File.Exists(tempOut)) File.Delete(tempOut);
 
