@@ -1,14 +1,78 @@
+using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace UsualAudioConverter;
 
 public static class EncoderService
 {
+    private static bool? _hasLibFdkAac;
+    private static readonly SemaphoreSlim _fdkCheckLock = new(1, 1);
+
+    /// <summary>
+    /// FFmpeg が libfdk_aac をサポートしているか判定（結果をキャッシュ）
+    /// </summary>
+    public static async Task<bool> CheckLibFdkSupportAsync(string ffmpegPath, CancellationToken ct = default)
+    {
+        if (_hasLibFdkAac.HasValue) return _hasLibFdkAac.Value;
+
+        await _fdkCheckLock.WaitAsync(ct);
+        try
+        {
+            if (_hasLibFdkAac.HasValue) return _hasLibFdkAac.Value;
+
+            if (!File.Exists(ffmpegPath) && !string.Equals(ffmpegPath, "ffmpeg.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                _hasLibFdkAac = false;
+                return false;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                Arguments = "-encoders",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc != null)
+            {
+                string output = await proc.StandardOutput.ReadToEndAsync(ct);
+                await proc.WaitForExitAsync(ct);
+                _hasLibFdkAac = output.Contains("libfdk_aac");
+            }
+            else
+            {
+                _hasLibFdkAac = false;
+            }
+        }
+        catch
+        {
+            _hasLibFdkAac = false;
+        }
+        finally
+        {
+            _fdkCheckLock.Release();
+        }
+
+        return _hasLibFdkAac.Value;
+    }
+
+    public static void ResetFdkCache()
+    {
+        _hasLibFdkAac = null;
+    }
+
     public static async Task EncodeAsync(
         AudioItem item,
         string ffmpegPath,
         string exhalePath,
+        string fdkaacPath,
         EncoderProfile profile,
         object qualityValue,
         IProgress<string> progress,
@@ -19,11 +83,34 @@ public static class EncoderService
 
         try
         {
+            // --- AAC-LC / HE-AAC の自動フォールバック判定 ---
+            if (profile.Mode == "fdk_vbr" || (profile.Codec == "libfdk_aac" && profile.Mode == "bitrate"))
+            {
+                bool hasLibFdk = await CheckLibFdkSupportAsync(ffmpegPath, ct);
+                bool hasFdkaacCli = !string.IsNullOrEmpty(fdkaacPath) && File.Exists(fdkaacPath);
+
+                if (!hasLibFdk && hasFdkaacCli)
+                {
+                    // 分岐2: FFmpegにlibfdk_aacがないが、fdkaac.exeがある -> パイプ処理
+                    await EncodeWithFdkaacCliAsync(item, ffmpegPath, fdkaacPath, profile, qualityValue, tempOut, progress, ct);
+                    FinalizeOutputFile(item, tempOut, progress);
+                    return;
+                }
+                else if (!hasLibFdk && !hasFdkaacCli)
+                {
+                    // 分岐3: どちらもない -> FFmpeg 内蔵 aac にフォールバック
+                    await EncodeWithNativeAacAsync(item, ffmpegPath, profile, qualityValue, tempOut, progress, ct);
+                    FinalizeOutputFile(item, tempOut, progress);
+                    return;
+                }
+                // 分岐1: libfdk_aac がある場合はそのまま下の通常の FFmpeg 単体処理へ進む
+            }
+
+            // --- 通常の FFmpeg / exhale 処理 ---
             if (profile.Engine == "ffmpeg")
             {
                 var args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a {profile.Codec} ";
 
-                // プロファイルごとの品質 / レート指定（VBR / ABR）
                 switch (profile.Mode)
                 {
                     case "lame_vbr":
@@ -64,7 +151,6 @@ public static class EncoderService
                         break;
 
                     case "none":
-                        // ロスレス形式 (FLAC / ALAC / WavPack)
                         break;
                 }
 
@@ -113,8 +199,6 @@ public static class EncoderService
                     progress.Report($"xHEパイプ変換中({preset})");
                     if (File.Exists(exhaleRawOut)) File.Delete(exhaleRawOut);
 
-                    // cmd.exe を一切介さず、C# の Stream で直接パイプラインを中継
-                    // ネットワーク共有（UNCパス \server\share や Z:\）でもシェル制約・クォート崩れを受けない
                     var ffPsi = new ProcessStartInfo
                     {
                         FileName = ffmpegPath,
@@ -141,7 +225,6 @@ public static class EncoderService
                         procFf.Start();
                         procEx.Start();
 
-                        // FFmpegの標準出力をexhaleの標準入力へ非同期ストリームコピー
                         var pipeTask = Task.Run(async () =>
                         {
                             try
@@ -150,7 +233,7 @@ public static class EncoderService
                             }
                             finally
                             {
-                                procEx.StandardInput.Close(); // 入力終了を通知
+                                procEx.StandardInput.Close();
                             }
                         }, ct);
 
@@ -171,7 +254,6 @@ public static class EncoderService
                         }
                     }
 
-                    // メタデータ転送
                     progress.Report("メタデータ転送中");
                     if (File.Exists(tempOut)) File.Delete(tempOut);
 
@@ -186,17 +268,7 @@ public static class EncoderService
                 }
             }
 
-            string? destDir = Path.GetDirectoryName(item.DestinationPath);
-            if (!string.IsNullOrEmpty(destDir))
-                Directory.CreateDirectory(destDir);
-
-            if (File.Exists(item.DestinationPath))
-                File.Delete(item.DestinationPath);
-
-            File.Move(tempOut, item.DestinationPath);
-
-            item.Status = "完了";
-            progress.Report("完了");
+            FinalizeOutputFile(item, tempOut, progress);
         }
         catch (OperationCanceledException)
         {
@@ -216,6 +288,168 @@ public static class EncoderService
                 try { File.Delete(tempOut); } catch { }
             }
         }
+    }
+
+    /// <summary>
+    /// 分岐2: FFmpeg (WAVパイプ出力) -> fdkaac.exe (stdin) -> FFmpeg タグ・アート転送
+    /// </summary>
+    private static async Task EncodeWithFdkaacCliAsync(
+        AudioItem item,
+        string ffmpegPath,
+        string fdkaacPath,
+        EncoderProfile profile,
+        object qualityValue,
+        string finalTempOut,
+        IProgress<string> progress,
+        CancellationToken ct)
+    {
+        string rawM4a = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_fdkraw.m4a");
+
+        try
+        {
+            string fdkArgs = string.Empty;
+
+            if (profile.Profile == "aac_he")
+                fdkArgs += "-p 5 "; // HE-AAC v1
+            else if (profile.Profile == "aac_he_v2")
+                fdkArgs += "-p 29 "; // HE-AAC v2
+            else
+                fdkArgs += "-p 2 "; // AAC-LC
+
+            if (profile.Mode == "fdk_vbr")
+            {
+                string fdkStr = qualityValue.ToString() ?? "5";
+                int fdkMode = 5;
+                int idx = fdkStr.IndexOf("Mode ");
+                if (idx >= 0 && idx + 5 < fdkStr.Length && char.IsDigit(fdkStr[idx + 5]))
+                    fdkMode = fdkStr[idx + 5] - '0';
+                fdkArgs += $"-m {fdkMode} ";
+            }
+            else
+            {
+                int kbps = qualityValue is int k ? k : 64;
+                fdkArgs += $"-b {kbps} ";
+            }
+
+            fdkArgs += $"-o \"{rawM4a}\" -";
+
+            progress.Report("fdkaacパイプ変換中");
+
+            var ffPsi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                Arguments = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav -",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            var fdkPsi = new ProcessStartInfo
+            {
+                FileName = fdkaacPath,
+                Arguments = fdkArgs,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardError = true
+            };
+
+            using (var procFf = new Process { StartInfo = ffPsi })
+            using (var procFdk = new Process { StartInfo = fdkPsi })
+            {
+                procFf.Start();
+                procFdk.Start();
+
+                var pipeTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await procFf.StandardOutput.BaseStream.CopyToAsync(procFdk.StandardInput.BaseStream, ct);
+                    }
+                    finally
+                    {
+                        procFdk.StandardInput.Close();
+                    }
+                }, ct);
+
+                var ffErrTask = procFf.StandardError.ReadToEndAsync(ct);
+                var fdkErrTask = procFdk.StandardError.ReadToEndAsync(ct);
+
+                await Task.WhenAll(procFf.WaitForExitAsync(ct), procFdk.WaitForExitAsync(ct), pipeTask);
+
+                if (procFf.ExitCode != 0)
+                {
+                    string ffErr = await ffErrTask;
+                    throw new InvalidOperationException($"FFmpeg異常終了 (ExitCode: {procFf.ExitCode}):\n{ffErr}");
+                }
+                if (procFdk.ExitCode != 0)
+                {
+                    string fdkErr = await fdkErrTask;
+                    throw new InvalidOperationException($"fdkaac異常終了 (ExitCode: {procFdk.ExitCode}):\n{fdkErr}");
+                }
+            }
+
+            // メタデータ・アートワーク転送
+            progress.Report("メタデータ転送中");
+            string tagArgs = $"-y -nostdin -i \"{rawM4a}\" -i \"{item.SourcePath}\" " +
+                             $"-map 0:a -map 1:v? -c copy -disposition:v:0 attached_pic " +
+                             $"-map_metadata 1 -movflags +faststart \"{finalTempOut}\"";
+            await RunProcessAsync(ffmpegPath, tagArgs, ct, null);
+        }
+        finally
+        {
+            if (File.Exists(rawM4a)) { try { File.Delete(rawM4a); } catch { } }
+        }
+    }
+
+    /// <summary>
+    /// 分岐3: FFmpeg 内蔵 aac エンコーダーにフォールバック (AAC-LC のみ)
+    /// </summary>
+    private static async Task EncodeWithNativeAacAsync(
+        AudioItem item,
+        string ffmpegPath,
+        EncoderProfile profile,
+        object qualityValue,
+        string finalTempOut,
+        IProgress<string> progress,
+        CancellationToken ct)
+    {
+        progress.Report("内蔵AACフォールバック");
+
+        int kbps = 192;
+        if (profile.Mode == "fdk_vbr")
+        {
+            string fdkStr = qualityValue.ToString() ?? "5";
+            kbps = fdkStr.Contains("Mode 5") ? 256 :
+                   fdkStr.Contains("Mode 4") ? 192 :
+                   fdkStr.Contains("Mode 3") ? 128 :
+                   fdkStr.Contains("Mode 2") ? 96 : 64;
+        }
+        else if (qualityValue is int k)
+        {
+            kbps = k;
+        }
+
+        string args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a aac -b:a {kbps}k " +
+                      $"-map 0:v? -c:v copy -disposition:v:0 attached_pic -map_metadata 0 -movflags +faststart \"{finalTempOut}\"";
+
+        await RunProcessAsync(ffmpegPath, args, ct, progress);
+    }
+
+    private static void FinalizeOutputFile(AudioItem item, string tempOut, IProgress<string> progress)
+    {
+        string? destDir = Path.GetDirectoryName(item.DestinationPath);
+        if (!string.IsNullOrEmpty(destDir))
+            Directory.CreateDirectory(destDir);
+
+        if (File.Exists(item.DestinationPath))
+            File.Delete(item.DestinationPath);
+
+        File.Move(tempOut, item.DestinationPath);
+
+        item.Status = "完了";
+        progress.Report("完了");
     }
 
     private static async Task RunProcessAsync(string exe, string args, CancellationToken ct, IProgress<string>? progress)

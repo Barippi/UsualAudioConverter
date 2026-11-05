@@ -1,6 +1,11 @@
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
@@ -26,6 +31,7 @@ public partial class MainWindow : Window
 
     private string _ffmpegPath = "ffmpeg.exe";
     private string _exhalePath = "exhale.exe";
+    private string _fdkaacPath = "fdkaac.exe";
     private CancellationTokenSource? _cts;
 
     public MainWindow()
@@ -47,21 +53,47 @@ public partial class MainWindow : Window
 
         GridItems.ItemsSource = Items;
         InitializeControls();
+        Loaded += async (s, e) => await RefreshProfilesAsync();
     }
 
     private void InitializeControls()
     {
-        var profiles = EncoderProfile.GetProfiles();
-        ComboProfiles.ItemsSource = profiles;
-        ComboProfiles.DisplayMemberPath = "Name";
-        ComboProfiles.SelectedIndex = 0;
-
         int cores = Environment.ProcessorCount;
         int defaultThreads = cores <= 2 ? 1 : (cores <= 4 ? 2 : Math.Min(8, cores - 2));
 
         var threadOptions = new HashSet<int> { 1, 2, 4, 6, 8, cores, defaultThreads };
         ComboThreads.ItemsSource = threadOptions.Where(t => t <= cores).OrderBy(t => t).ToList();
         ComboThreads.SelectedItem = defaultThreads;
+    }
+
+    /// <summary>
+    /// FDK (FFmpeg libfdk_aac または fdkaac.exe) の利用可否に応じてプロファイル一覧を動的に更新
+    /// 内蔵 AAC のみの場合は HE-AAC v1 / v2 を非表示にする
+    /// </summary>
+    private async Task RefreshProfilesAsync()
+    {
+        bool hasLibFdk = await EncoderService.CheckLibFdkSupportAsync(_ffmpegPath);
+        bool hasFdkaac = !string.IsNullOrEmpty(_fdkaacPath) && File.Exists(_fdkaacPath);
+        bool canUseFdk = hasLibFdk || hasFdkaac;
+
+        var allProfiles = EncoderProfile.GetProfiles();
+        var availableProfiles = canUseFdk
+            ? allProfiles
+            : allProfiles.Where(p => !p.RequiresFdk).ToList();
+
+        var currentSelected = ComboProfiles.SelectedItem as EncoderProfile;
+
+        ComboProfiles.ItemsSource = availableProfiles;
+        ComboProfiles.DisplayMemberPath = "Name";
+
+        if (currentSelected != null && availableProfiles.Any(p => p.Name == currentSelected.Name))
+        {
+            ComboProfiles.SelectedItem = availableProfiles.First(p => p.Name == currentSelected.Name);
+        }
+        else
+        {
+            ComboProfiles.SelectedIndex = 0;
+        }
     }
 
     private void ComboProfiles_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -168,7 +200,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnSettings_Click(object sender, RoutedEventArgs e)
+    private async void BtnSettings_Click(object sender, RoutedEventArgs e)
     {
         var ofdFf = new OpenFileDialog
         {
@@ -176,7 +208,10 @@ public partial class MainWindow : Window
             Filter = "ffmpeg.exe|ffmpeg.exe|All Files|*.*"
         };
         if (ofdFf.ShowDialog() == true)
+        {
             _ffmpegPath = ofdFf.FileName;
+            EncoderService.ResetFdkCache();
+        }
 
         var ofdEx = new OpenFileDialog
         {
@@ -185,6 +220,16 @@ public partial class MainWindow : Window
         };
         if (ofdEx.ShowDialog() == true)
             _exhalePath = ofdEx.FileName;
+
+        var ofdFdk = new OpenFileDialog
+        {
+            Title = "fdkaac.exe を指定 (libfdk非対応FFmpeg用 / 任意)",
+            Filter = "fdkaac.exe|fdkaac.exe|All Files|*.*"
+        };
+        if (ofdFdk.ShowDialog() == true)
+            _fdkaacPath = ofdFdk.FileName;
+
+        await RefreshProfilesAsync();
     }
 
     private static string? CalculateCommonRootFast(IList<AudioItem> items)
@@ -210,9 +255,6 @@ public partial class MainWindow : Window
         return lastSlash > 0 ? common[..lastSlash] : common;
     }
 
-    /// <summary>
-    /// 各アルバムフォルダ内の cover.jpg / folder.jpg などの付随ファイルを出力先へ自動コピー
-    /// </summary>
     private static void CopyAlbumCompanionFiles(IEnumerable<AudioItem> items)
     {
         var folderPairs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -257,7 +299,6 @@ public partial class MainWindow : Window
             }
             catch
             {
-                // コピー失敗時もエンコード処理は継続
             }
         }
     }
@@ -312,7 +353,6 @@ public partial class MainWindow : Window
             item.DestinationPath = targetPath;
         }
 
-        // エンコード開始前にアルバム付随ファイル (cover.jpg, folder.jpg 等) を出力先へコピー
         CopyAlbumCompanionFiles(Items);
 
         SetUiEncodingState(true);
@@ -341,6 +381,7 @@ public partial class MainWindow : Window
                         item,
                         _ffmpegPath,
                         _exhalePath,
+                        _fdkaacPath,
                         profile,
                         quality,
                         progress,
