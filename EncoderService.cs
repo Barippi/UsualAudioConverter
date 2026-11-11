@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -11,9 +12,6 @@ public static class EncoderService
     private static bool? _hasLibFdkAac;
     private static readonly SemaphoreSlim _fdkCheckLock = new(1, 1);
 
-    /// <summary>
-    /// FFmpeg が libfdk_aac をサポートしているか判定（結果をキャッシュ）
-    /// </summary>
     public static async Task<bool> CheckLibFdkSupportAsync(string ffmpegPath, CancellationToken ct = default)
     {
         if (_hasLibFdkAac.HasValue) return _hasLibFdkAac.Value;
@@ -23,21 +21,15 @@ public static class EncoderService
         {
             if (_hasLibFdkAac.HasValue) return _hasLibFdkAac.Value;
 
-            if (!File.Exists(ffmpegPath) && !string.Equals(ffmpegPath, "ffmpeg.exe", StringComparison.OrdinalIgnoreCase))
-            {
-                _hasLibFdkAac = false;
-                return false;
-            }
-
             var psi = new ProcessStartInfo
             {
                 FileName = ffmpegPath,
-                Arguments = "-encoders",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            psi.ArgumentList.Add("-encoders");
 
             using var proc = Process.Start(psi);
             if (proc != null)
@@ -83,33 +75,28 @@ public static class EncoderService
 
         try
         {
-            // --- AAC-LC / HE-AAC の自動フォールバック判定 ---
             if (profile.Mode == "fdk_vbr" || (profile.Codec == "libfdk_aac" && profile.Mode == "bitrate"))
             {
                 bool hasLibFdk = await CheckLibFdkSupportAsync(ffmpegPath, ct);
-                bool hasFdkaacCli = !string.IsNullOrEmpty(fdkaacPath) && File.Exists(fdkaacPath);
+                bool hasFdkaacCli = !string.IsNullOrEmpty(fdkaacPath) && (File.Exists(fdkaacPath) || !fdkaacPath.Contains(Path.DirectorySeparatorChar));
 
                 if (!hasLibFdk && hasFdkaacCli)
                 {
-                    // 分岐2: FFmpegにlibfdk_aacがないが、fdkaac.exeがある -> パイプ処理
                     await EncodeWithFdkaacCliAsync(item, ffmpegPath, fdkaacPath, profile, qualityValue, tempOut, progress, ct);
                     FinalizeOutputFile(item, tempOut, progress);
                     return;
                 }
                 else if (!hasLibFdk && !hasFdkaacCli)
                 {
-                    // 分岐3: どちらもない -> FFmpeg 内蔵 aac にフォールバック
                     await EncodeWithNativeAacAsync(item, ffmpegPath, profile, qualityValue, tempOut, progress, ct);
                     FinalizeOutputFile(item, tempOut, progress);
                     return;
                 }
-                // 分岐1: libfdk_aac がある場合はそのまま下の通常の FFmpeg 単体処理へ進む
             }
 
-            // --- 通常の FFmpeg / exhale 処理 ---
             if (profile.Engine == "ffmpeg")
             {
-                var args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a {profile.Codec} ";
+                var args = new List<string> { "-y", "-nostdin", "-i", item.SourcePath, "-map", "0:a:0", "-c:a", profile.Codec ?? "copy" };
 
                 switch (profile.Mode)
                 {
@@ -118,7 +105,8 @@ public static class EncoderService
                         int vbrNum = 2;
                         if (qStr.StartsWith("V") && char.IsDigit(qStr[1]))
                             vbrNum = qStr[1] - '0';
-                        args += $"-q:a {vbrNum} ";
+                        args.Add("-q:a");
+                        args.Add(vbrNum.ToString());
                         break;
 
                     case "fdk_vbr":
@@ -127,7 +115,8 @@ public static class EncoderService
                         int idx = fdkStr.IndexOf("Mode ");
                         if (idx >= 0 && idx + 5 < fdkStr.Length && char.IsDigit(fdkStr[idx + 5]))
                             fdkMode = fdkStr[idx + 5] - '0';
-                        args += $"-vbr {fdkMode} ";
+                        args.Add("-vbr");
+                        args.Add(fdkMode.ToString());
                         break;
 
                     case "vorbis_vbr":
@@ -138,15 +127,20 @@ public static class EncoderService
                             if (vorbisStr.StartsWith("q10")) qLevel = 10;
                             else qLevel = vorbisStr[1] - '0';
                         }
-                        args += $"-q:a {qLevel} ";
+                        args.Add("-q:a");
+                        args.Add(qLevel.ToString());
                         break;
 
                     case "bitrate":
                         int kbps = qualityValue is int k ? k : 128;
-                        args += $"-b:a {kbps}k ";
+                        args.Add("-b:a");
+                        args.Add($"{kbps}k");
                         if (profile.Codec == "libopus")
                         {
-                            args += "-vbr on -application audio ";
+                            args.Add("-vbr");
+                            args.Add("on");
+                            args.Add("-application");
+                            args.Add("audio");
                         }
                         break;
 
@@ -155,21 +149,34 @@ public static class EncoderService
                 }
 
                 if (!string.IsNullOrEmpty(profile.Profile))
-                    args += $"-profile:a {profile.Profile} ";
+                {
+                    args.Add("-profile:a");
+                    args.Add(profile.Profile);
+                }
 
                 if (profile.Profile is "aac_he" or "aac_he_v2")
-                    args += "-ac 2 -ar 44100 ";
+                {
+                    args.AddRange(new[] { "-ac", "2", "-ar", "44100" });
+                }
 
                 if (profile.Extension == ".m4a")
-                    args += "-map 0:v? -c:v copy -disposition:v:0 attached_pic -map_metadata 0 -movflags +faststart ";
+                {
+                    args.AddRange(new[] { "-map", "0:v?", "-c:v", "copy", "-disposition:v:0", "attached_pic", "-map_metadata", "0", "-movflags", "+faststart" });
+                }
                 else if (profile.Extension == ".mp3")
-                    args += "-map 0:v? -c:v copy -id3v2_version 3 -map_metadata 0 ";
+                {
+                    args.AddRange(new[] { "-map", "0:v?", "-c:v", "copy", "-id3v2_version", "3", "-map_metadata", "0" });
+                }
                 else if (profile.Extension is ".flac" or ".wv")
-                    args += "-map 0:v? -c:v copy -map_metadata 0 ";
+                {
+                    args.AddRange(new[] { "-map", "0:v?", "-c:v", "copy", "-map_metadata", "0" });
+                }
                 else
-                    args += "-vn -map_metadata 0 ";
+                {
+                    args.AddRange(new[] { "-vn", "-map_metadata", "0" });
+                }
 
-                args += $"\"{tempOut}\"";
+                args.Add(tempOut);
 
                 await RunProcessAsync(ffmpegPath, args, ct, progress);
             }
@@ -202,22 +209,34 @@ public static class EncoderService
                     var ffPsi = new ProcessStartInfo
                     {
                         FileName = ffmpegPath,
-                        Arguments = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav -",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true
                     };
+                    ffPsi.ArgumentList.Add("-y");
+                    ffPsi.ArgumentList.Add("-nostdin");
+                    ffPsi.ArgumentList.Add("-i");
+                    ffPsi.ArgumentList.Add(item.SourcePath);
+                    ffPsi.ArgumentList.Add("-vn");
+                    ffPsi.ArgumentList.Add("-ac");
+                    ffPsi.ArgumentList.Add("2");
+                    ffPsi.ArgumentList.Add("-ar");
+                    ffPsi.ArgumentList.Add("44100");
+                    ffPsi.ArgumentList.Add("-f");
+                    ffPsi.ArgumentList.Add("wav");
+                    ffPsi.ArgumentList.Add("-");
 
                     var exPsi = new ProcessStartInfo
                     {
                         FileName = exhalePath,
-                        Arguments = $"{preset} \"{exhaleRawOut}\"",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardInput = true,
                         RedirectStandardError = true
                     };
+                    exPsi.ArgumentList.Add(preset);
+                    exPsi.ArgumentList.Add(exhaleRawOut);
 
                     using (var procFf = new Process { StartInfo = ffPsi })
                     using (var procEx = new Process { StartInfo = exPsi })
@@ -257,9 +276,19 @@ public static class EncoderService
                     progress.Report("メタデータ転送中");
                     if (File.Exists(tempOut)) File.Delete(tempOut);
 
-                    string tagArgs = $"-y -nostdin -i \"{exhaleRawOut}\" -i \"{item.SourcePath}\" " +
-                                     $"-map 0:a -map 1:v? -c copy -disposition:v:0 attached_pic " +
-                                     $"-map_metadata 1 -movflags +faststart \"{tempOut}\"";
+                    var tagArgs = new List<string>
+                    {
+                        "-y", "-nostdin",
+                        "-i", exhaleRawOut,
+                        "-i", item.SourcePath,
+                        "-map", "0:a",
+                        "-map", "1:v?",
+                        "-c", "copy",
+                        "-disposition:v:0", "attached_pic",
+                        "-map_metadata", "1",
+                        "-movflags", "+faststart",
+                        tempOut
+                    };
                     await RunProcessAsync(ffmpegPath, tagArgs, ct, null);
                 }
                 finally
@@ -290,9 +319,6 @@ public static class EncoderService
         }
     }
 
-    /// <summary>
-    /// 分岐2: FFmpeg (WAVパイプ出力) -> fdkaac.exe (stdin) -> FFmpeg タグ・アート転送
-    /// </summary>
     private static async Task EncodeWithFdkaacCliAsync(
         AudioItem item,
         string ffmpegPath,
@@ -307,14 +333,23 @@ public static class EncoderService
 
         try
         {
-            string fdkArgs = string.Empty;
+            var fdkArgs = new List<string>();
 
             if (profile.Profile == "aac_he")
-                fdkArgs += "-p 5 "; // HE-AAC v1
+            {
+                fdkArgs.Add("-p");
+                fdkArgs.Add("5");
+            }
             else if (profile.Profile == "aac_he_v2")
-                fdkArgs += "-p 29 "; // HE-AAC v2
+            {
+                fdkArgs.Add("-p");
+                fdkArgs.Add("29");
+            }
             else
-                fdkArgs += "-p 2 "; // AAC-LC
+            {
+                fdkArgs.Add("-p");
+                fdkArgs.Add("2");
+            }
 
             if (profile.Mode == "fdk_vbr")
             {
@@ -323,37 +358,55 @@ public static class EncoderService
                 int idx = fdkStr.IndexOf("Mode ");
                 if (idx >= 0 && idx + 5 < fdkStr.Length && char.IsDigit(fdkStr[idx + 5]))
                     fdkMode = fdkStr[idx + 5] - '0';
-                fdkArgs += $"-m {fdkMode} ";
+                fdkArgs.Add("-m");
+                fdkArgs.Add(fdkMode.ToString());
             }
             else
             {
                 int kbps = qualityValue is int k ? k : 64;
-                fdkArgs += $"-b {kbps} ";
+                fdkArgs.Add("-b");
+                fdkArgs.Add(kbps.ToString());
             }
 
-            fdkArgs += $"-o \"{rawM4a}\" -";
+            fdkArgs.Add("-o");
+            fdkArgs.Add(rawM4a);
+            fdkArgs.Add("-");
 
             progress.Report("fdkaacパイプ変換中");
 
             var ffPsi = new ProcessStartInfo
             {
                 FileName = ffmpegPath,
-                Arguments = $"-y -nostdin -i \"{item.SourcePath}\" -vn -ac 2 -ar 44100 -f wav -",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            ffPsi.ArgumentList.Add("-y");
+            ffPsi.ArgumentList.Add("-nostdin");
+            ffPsi.ArgumentList.Add("-i");
+            ffPsi.ArgumentList.Add(item.SourcePath);
+            ffPsi.ArgumentList.Add("-vn");
+            ffPsi.ArgumentList.Add("-ac");
+            ffPsi.ArgumentList.Add("2");
+            ffPsi.ArgumentList.Add("-ar");
+            ffPsi.ArgumentList.Add("44100");
+            ffPsi.ArgumentList.Add("-f");
+            ffPsi.ArgumentList.Add("wav");
+            ffPsi.ArgumentList.Add("-");
 
             var fdkPsi = new ProcessStartInfo
             {
                 FileName = fdkaacPath,
-                Arguments = fdkArgs,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
                 RedirectStandardError = true
             };
+            foreach (var arg in fdkArgs)
+            {
+                fdkPsi.ArgumentList.Add(arg);
+            }
 
             using (var procFf = new Process { StartInfo = ffPsi })
             using (var procFdk = new Process { StartInfo = fdkPsi })
@@ -390,11 +443,20 @@ public static class EncoderService
                 }
             }
 
-            // メタデータ・アートワーク転送
             progress.Report("メタデータ転送中");
-            string tagArgs = $"-y -nostdin -i \"{rawM4a}\" -i \"{item.SourcePath}\" " +
-                             $"-map 0:a -map 1:v? -c copy -disposition:v:0 attached_pic " +
-                             $"-map_metadata 1 -movflags +faststart \"{finalTempOut}\"";
+            var tagArgs = new List<string>
+            {
+                "-y", "-nostdin",
+                "-i", rawM4a,
+                "-i", item.SourcePath,
+                "-map", "0:a",
+                "-map", "1:v?",
+                "-c", "copy",
+                "-disposition:v:0", "attached_pic",
+                "-map_metadata", "1",
+                "-movflags", "+faststart",
+                finalTempOut
+            };
             await RunProcessAsync(ffmpegPath, tagArgs, ct, null);
         }
         finally
@@ -403,9 +465,6 @@ public static class EncoderService
         }
     }
 
-    /// <summary>
-    /// 分岐3: FFmpeg 内蔵 aac エンコーダーにフォールバック (AAC-LC のみ)
-    /// </summary>
     private static async Task EncodeWithNativeAacAsync(
         AudioItem item,
         string ffmpegPath,
@@ -431,8 +490,20 @@ public static class EncoderService
             kbps = k;
         }
 
-        string args = $"-y -nostdin -i \"{item.SourcePath}\" -map 0:a:0 -c:a aac -b:a {kbps}k " +
-                      $"-map 0:v? -c:v copy -disposition:v:0 attached_pic -map_metadata 0 -movflags +faststart \"{finalTempOut}\"";
+        var args = new List<string>
+        {
+            "-y", "-nostdin",
+            "-i", item.SourcePath,
+            "-map", "0:a:0",
+            "-c:a", "aac",
+            "-b:a", $"{kbps}k",
+            "-map", "0:v?",
+            "-c:v", "copy",
+            "-disposition:v:0", "attached_pic",
+            "-map_metadata", "0",
+            "-movflags", "+faststart",
+            finalTempOut
+        };
 
         await RunProcessAsync(ffmpegPath, args, ct, progress);
     }
@@ -452,17 +523,21 @@ public static class EncoderService
         progress.Report("完了");
     }
 
-    private static async Task RunProcessAsync(string exe, string args, CancellationToken ct, IProgress<string>? progress)
+    private static async Task RunProcessAsync(string exe, IEnumerable<string> args, CancellationToken ct, IProgress<string>? progress)
     {
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = args,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
             RedirectStandardOutput = true
         };
+
+        foreach (var arg in args)
+        {
+            psi.ArgumentList.Add(arg);
+        }
 
         using var proc = new Process { StartInfo = psi };
         proc.Start();

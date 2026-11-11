@@ -1,14 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 
 namespace UsualAudioConverter;
@@ -20,7 +19,6 @@ public partial class MainWindow : Window
         ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".wv"
     };
 
-    // アルバム付随ファイルとして自動コピー対象とする拡張子
     private static readonly HashSet<string> CompanionExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".webp", ".cue", ".log"
@@ -29,6 +27,7 @@ public partial class MainWindow : Window
     public ObservableCollection<AudioItem> Items { get; } = new();
     private readonly HashSet<string> _queuedPaths = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly AppConfig _config = AppConfig.Load();
     private string _ffmpegPath = "ffmpeg.exe";
     private string _exhalePath = "exhale.exe";
     private string _fdkaacPath = "fdkaac.exe";
@@ -38,21 +37,13 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        try
-        {
-            var asm = Assembly.GetExecutingAssembly();
-            using var stream = asm.GetManifestResourceStream("UsualAudioConverter.app.ico");
-            if (stream != null)
-            {
-                Icon = BitmapFrame.Create(stream);
-            }
-        }
-        catch
-        {
-        }
+        _ffmpegPath = _config.FfmpegPath;
+        _exhalePath = _config.ExhalePath;
+        _fdkaacPath = _config.FdkaacPath;
 
         GridItems.ItemsSource = Items;
         InitializeControls();
+
         Loaded += async (s, e) => await RefreshProfilesAsync();
     }
 
@@ -66,14 +57,10 @@ public partial class MainWindow : Window
         ComboThreads.SelectedItem = defaultThreads;
     }
 
-    /// <summary>
-    /// FDK (FFmpeg libfdk_aac または fdkaac.exe) の利用可否に応じてプロファイル一覧を動的に更新
-    /// 内蔵 AAC のみの場合は HE-AAC v1 / v2 を非表示にする
-    /// </summary>
     private async Task RefreshProfilesAsync()
     {
         bool hasLibFdk = await EncoderService.CheckLibFdkSupportAsync(_ffmpegPath);
-        bool hasFdkaac = !string.IsNullOrEmpty(_fdkaacPath) && File.Exists(_fdkaacPath);
+        bool hasFdkaac = !string.IsNullOrEmpty(_fdkaacPath) && (File.Exists(_fdkaacPath) || !_fdkaacPath.Contains(Path.DirectorySeparatorChar));
         bool canUseFdk = hasLibFdk || hasFdkaac;
 
         var allProfiles = EncoderProfile.GetProfiles();
@@ -84,7 +71,6 @@ public partial class MainWindow : Window
         var currentSelected = ComboProfiles.SelectedItem as EncoderProfile;
 
         ComboProfiles.ItemsSource = availableProfiles;
-        ComboProfiles.DisplayMemberPath = "Name";
 
         if (currentSelected != null && availableProfiles.Any(p => p.Name == currentSelected.Name))
         {
@@ -114,33 +100,56 @@ public partial class MainWindow : Window
         }
     }
 
-    private void GridItems_DragOver(object sender, DragEventArgs e)
+    private void Window_DragOver(object sender, DragEventArgs e)
     {
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
             e.Effects = DragDropEffects.Copy;
+        }
         else
+        {
             e.Effects = DragDropEffects.None;
+        }
         e.Handled = true;
     }
 
-    private void GridItems_Drop(object sender, DragEventArgs e)
+    private void Window_Drop(object sender, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-        var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-        if (files == null || files.Length == 0) return;
-        AddPaths(files);
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            if (e.Data.GetData(DataFormats.FileDrop) is string[] files)
+            {
+                AddPaths(files);
+            }
+        }
     }
 
     private void BtnAddFiles_Click(object sender, RoutedEventArgs e)
     {
-        var ofd = new OpenFileDialog
+        var dlg = new OpenFileDialog
         {
+            Title = "音声ファイルを選択 (複数選択可)",
             Multiselect = true,
             Filter = "Audio Files|*.wav;*.flac;*.mp3;*.m4a;*.aac;*.ogg;*.opus;*.wma;*.aiff;*.wv|All Files|*.*"
         };
-        if (ofd.ShowDialog() == true)
+
+        if (dlg.ShowDialog() == true)
         {
-            AddPaths(ofd.FileNames);
+            AddPaths(dlg.FileNames);
+        }
+    }
+
+    private void BtnAddFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFolderDialog
+        {
+            Title = "追加する音源フォルダを選択 (Ctrl/Shiftで複数選択可)",
+            Multiselect = true
+        };
+
+        if (dlg.ShowDialog() == true)
+        {
+            AddPaths(dlg.FolderNames);
         }
     }
 
@@ -149,18 +158,25 @@ public partial class MainWindow : Window
         var collected = new List<string>();
         foreach (var path in paths)
         {
-            if (File.Exists(path) && ValidExtensions.Contains(Path.GetExtension(path)))
-                collected.Add(path);
-            else if (Directory.Exists(path))
+            try
             {
-                foreach (var f in Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories))
+                if (File.Exists(path))
                 {
-                    if (ValidExtensions.Contains(Path.GetExtension(f)))
-                        collected.Add(f);
+                    if (ValidExtensions.Contains(Path.GetExtension(path)))
+                        collected.Add(path);
                 }
+                else if (Directory.Exists(path))
+                {
+                    TraverseDirectorySafe(path, collected);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Path scan error ({path}): {ex.Message}");
             }
         }
 
+        int addedCount = 0;
         foreach (var file in collected)
         {
             if (_queuedPaths.Add(file))
@@ -170,18 +186,56 @@ public partial class MainWindow : Window
                     FileName = Path.GetFileName(file),
                     SourcePath = file
                 });
+                addedCount++;
             }
         }
-        TxtStatus.Text = $"{Items.Count} 件のファイルが登録されています";
+
+        TxtStatus.Text = $"{Items.Count} 件のファイルが登録されています (追加: {addedCount}件)";
+    }
+
+    private static void TraverseDirectorySafe(string rootDir, List<string> collected)
+    {
+        var dirsToVisit = new Stack<string>();
+        dirsToVisit.Push(rootDir);
+
+        while (dirsToVisit.Count > 0)
+        {
+            string currentDir = dirsToVisit.Pop();
+
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(currentDir))
+                {
+                    if (ValidExtensions.Contains(Path.GetExtension(file)))
+                    {
+                        collected.Add(file);
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                foreach (var subDir in Directory.EnumerateDirectories(currentDir))
+                {
+                    try
+                    {
+                        var di = new DirectoryInfo(subDir);
+                        if ((di.Attributes & FileAttributes.ReparsePoint) != 0)
+                            continue;
+
+                        dirsToVisit.Push(subDir);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
     }
 
     private void BtnClear_Click(object sender, RoutedEventArgs e)
     {
-        if (_cts != null)
-        {
-            MessageBox.Show("変換実行中はリストをクリアできません。", "警告", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
+        if (_cts != null) return;
         Items.Clear();
         _queuedPaths.Clear();
         ProgressTotal.Value = 0;
@@ -190,44 +244,55 @@ public partial class MainWindow : Window
 
     private void BtnBrowseDir_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog
+        var dlg = new OpenFolderDialog
         {
-            Title = "保存先フォルダを選択"
+            Title = "保存先フォルダを選択",
+            Multiselect = false
         };
-        if (dialog.ShowDialog() == true)
+
+        if (dlg.ShowDialog() == true)
         {
-            TxtCustomDir.Text = dialog.FolderName;
+            TxtCustomDir.Text = dlg.FolderName;
         }
     }
 
     private async void BtnSettings_Click(object sender, RoutedEventArgs e)
     {
-        var ofdFf = new OpenFileDialog
+        var dlgFf = new OpenFileDialog
         {
             Title = "ffmpeg.exe を指定",
-            Filter = "ffmpeg.exe|ffmpeg.exe|All Files|*.*"
+            Filter = "ffmpeg.exe|ffmpeg.exe|Executable (*.exe)|*.exe|All Files|*.*"
         };
-        if (ofdFf.ShowDialog() == true)
+        if (dlgFf.ShowDialog() == true)
         {
-            _ffmpegPath = ofdFf.FileName;
+            _ffmpegPath = dlgFf.FileName;
             EncoderService.ResetFdkCache();
         }
 
-        var ofdEx = new OpenFileDialog
+        var dlgEx = new OpenFileDialog
         {
             Title = "exhale.exe を指定",
-            Filter = "exhale.exe|exhale.exe|All Files|*.*"
+            Filter = "exhale.exe|exhale.exe|Executable (*.exe)|*.exe|All Files|*.*"
         };
-        if (ofdEx.ShowDialog() == true)
-            _exhalePath = ofdEx.FileName;
-
-        var ofdFdk = new OpenFileDialog
+        if (dlgEx.ShowDialog() == true)
         {
-            Title = "fdkaac.exe を指定 (libfdk非対応FFmpeg用 / 任意)",
-            Filter = "fdkaac.exe|fdkaac.exe|All Files|*.*"
+            _exhalePath = dlgEx.FileName;
+        }
+
+        var dlgFdk = new OpenFileDialog
+        {
+            Title = "fdkaac.exe を指定 (任意)",
+            Filter = "fdkaac.exe|fdkaac.exe|Executable (*.exe)|*.exe|All Files|*.*"
         };
-        if (ofdFdk.ShowDialog() == true)
-            _fdkaacPath = ofdFdk.FileName;
+        if (dlgFdk.ShowDialog() == true)
+        {
+            _fdkaacPath = dlgFdk.FileName;
+        }
+
+        _config.FfmpegPath = _ffmpegPath;
+        _config.ExhalePath = _exhalePath;
+        _config.FdkaacPath = _fdkaacPath;
+        _config.Save();
 
         await RefreshProfilesAsync();
     }
@@ -251,7 +316,7 @@ public partial class MainWindow : Window
         }
 
         string common = p1[..commonLen];
-        int lastSlash = common.LastIndexOfAny(new[] { '\\', '/' });
+        int lastSlash = common.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
         return lastSlash > 0 ? common[..lastSlash] : common;
     }
 
@@ -265,41 +330,28 @@ public partial class MainWindow : Window
             string destDir = Path.GetDirectoryName(item.DestinationPath) ?? string.Empty;
 
             if (!string.IsNullOrEmpty(srcDir) && !string.IsNullOrEmpty(destDir))
-            {
-                if (!folderPairs.ContainsKey(srcDir))
-                {
-                    folderPairs[srcDir] = destDir;
-                }
-            }
+                folderPairs.TryAdd(srcDir, destDir);
         }
 
         foreach (var (srcDir, destDir) in folderPairs)
         {
-            if (string.Equals(srcDir, destDir, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(srcDir, destDir, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(srcDir))
                 continue;
-
-            if (!Directory.Exists(srcDir)) continue;
 
             try
             {
                 Directory.CreateDirectory(destDir);
-
                 foreach (var file in Directory.EnumerateFiles(srcDir))
                 {
-                    string ext = Path.GetExtension(file);
-                    if (CompanionExtensions.Contains(ext))
+                    if (CompanionExtensions.Contains(Path.GetExtension(file)))
                     {
                         string targetFile = Path.Combine(destDir, Path.GetFileName(file));
                         if (!File.Exists(targetFile))
-                        {
                             File.Copy(file, targetFile, overwrite: false);
-                        }
                     }
                 }
             }
-            catch
-            {
-            }
+            catch { }
         }
     }
 
@@ -309,11 +361,11 @@ public partial class MainWindow : Window
         if (ComboProfiles.SelectedItem is not EncoderProfile profile) return;
 
         object quality = ComboBitrate.SelectedItem ?? profile.DefaultQuality;
-        int maxThreads = (int)ComboThreads.SelectedItem;
+        int maxThreads = (int)(ComboThreads.SelectedItem ?? 2);
 
         bool isCustom = RadioCustomDir.IsChecked == true;
         bool keepStructure = ChkKeepStructure.IsChecked == true;
-        string customBase = TxtCustomDir.Text.Trim();
+        string customBase = (TxtCustomDir.Text ?? string.Empty).Trim();
 
         string? commonRoot = (isCustom && keepStructure) ? CalculateCommonRootFast(Items) : null;
 
@@ -388,13 +440,11 @@ public partial class MainWindow : Window
                         ct
                     );
                 }
-                catch
-                {
-                }
+                catch { }
                 finally
                 {
                     int done = Interlocked.Increment(ref completed);
-                    Dispatcher.Invoke(() =>
+                    await Dispatcher.InvokeAsync(() =>
                     {
                         ProgressTotal.Value = done;
                         TxtStatus.Text = $"進捗: {done}/{Items.Count} 件完了";
@@ -427,6 +477,7 @@ public partial class MainWindow : Window
         BtnStart.IsEnabled = !isEncoding;
         BtnClear.IsEnabled = !isEncoding;
         BtnAddFiles.IsEnabled = !isEncoding;
+        BtnAddFolder.IsEnabled = !isEncoding;
         BtnSettings.IsEnabled = !isEncoding;
         ComboProfiles.IsEnabled = !isEncoding;
         ComboBitrate.IsEnabled = !isEncoding;
@@ -437,13 +488,5 @@ public partial class MainWindow : Window
         BtnBrowseDir.IsEnabled = !isEncoding && RadioCustomDir.IsChecked == true;
         ChkKeepStructure.IsEnabled = !isEncoding && RadioCustomDir.IsChecked == true;
         BtnCancel.IsEnabled = isEncoding;
-    }
-
-    private void GridItems_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
-    {
-        if (GridItems.SelectedItem is AudioItem selected && !string.IsNullOrEmpty(selected.ErrorLog))
-        {
-            MessageBox.Show(selected.ErrorLog, $"エラーログ - {selected.FileName}", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
     }
 }
